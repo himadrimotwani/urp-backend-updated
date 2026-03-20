@@ -1,0 +1,8 @@
+{
+  "retail_price": 60.0,
+  "buyer_salvage_value": 5.0,
+  "supplier_salvage_value": 15.0,
+  "supplier_cost": 15.0,
+  "return_shipping_buyer": 2.0,
+  "return_handling_supplier": 1.0
+}

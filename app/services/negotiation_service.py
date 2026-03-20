@@ -1,0 +1,364 @@
+"""
+Negotiation service functions for evaluating contract proposals.
+"""
+
+from simulation.core import Contract, EconomicParams, get_current_params, get_current_history
+from app.utils.ai_helpers import clean_ai_response
+from app.services.ai_client import openai_client, deepseek_client, ai_provider
+
+
+def supplier_evaluate_contract(
+    proposed: Contract,
+) -> tuple[str, str, Contract | None]:
+    """
+    Evaluates a contract proposal from the student using AI.
+    
+    Inputs:
+        proposed: A Contract object containing the student's proposed contract terms.
+    
+    What happens:
+        First validates the contract structure (buyback must be less than wholesale).
+        If invalid, immediately rejects with an explanation.
+        Otherwise, uses AI to evaluate the proposal based on economic parameters and demand history.
+        The AI can only accept or reject - no counteroffers on initial proposals.
+        Counteroffers only come after conversation in the chat.
+    
+    Output:
+        Returns a tuple of (decision, message, counter_contract):
+        - decision: "accept" or "reject" (never "counter" on initial proposal)
+        - message: AI-generated explanation for the decision
+        - counter_contract: Always None (counters come from chat)
+    
+    Context:
+        Called when student submits an initial contract proposal.
+        Part of the educational negotiation system that teaches contract terms and negotiation.
+        Counteroffers are intentionally not provided here - they emerge from chat discussions.
+    """
+    params = get_current_params()
+    
+    # Basic validation - reject invalid contracts immediately
+    if proposed.buyback_price >= proposed.wholesale_price:
+        return (
+            "reject",
+            "I cannot accept a buyback price that is greater than or equal to the wholesale price. The contract structure must be balanced.",
+            None,
+        )
+    
+    # Use AI to evaluate the proposal
+    # This provides more nuanced evaluation and educational feedback
+    return evaluate_proposal_with_ai(proposed, params)
+
+
+def evaluate_proposal_with_ai(
+    proposed: Contract,
+    params: EconomicParams,
+) -> tuple[str, str, Contract | None]:
+    """
+    Uses AI to evaluate a contract proposal and provide educational feedback.
+    
+    Inputs:
+        proposed: A Contract object with the student's proposed terms.
+        params: EconomicParams object containing supplier costs, salvage values, retail price.
+    
+    What happens:
+        Gets demand history for context.
+        Builds a detailed prompt explaining the proposal, supplier constraints, and demand context.
+        Sends the prompt to the AI (OpenAI or DeepSeek).
+        The AI evaluates whether the proposal is acceptable based on costs and market conditions.
+        Parses the AI response to extract decision and explanation message.
+        Falls back to simple logic if AI fails or is not configured.
+    
+    Output:
+        Returns a tuple of (decision, message, counter_contract):
+        - decision: "accept" or "reject"
+        - message: AI-generated explanation (educational, doesn't reveal exact costs)
+        - counter_contract: Always None (counters come from chat, not initial proposals)
+    
+    Context:
+        Called by supplier_evaluate_contract to get AI-based evaluation.
+        Provides educational feedback to help students understand contract economics.
+        Only returns accept/reject - counteroffers are intentionally excluded to encourage conversation.
+    """
+    # Get demand history for context
+    history = get_current_history()
+    
+    # Build evaluation prompt with proposal details, supplier constraints, and demand context
+    evaluation_prompt = f"""You are evaluating a contract proposal from a student buyer.
+
+PROPOSED CONTRACT:
+- Wholesale price: ${proposed.wholesale_price:.2f} per unit
+- Buyback price: ${proposed.buyback_price:.2f} per returned unit
+- Contract type: {proposed.contract_type}
+- Contract length: {proposed.length} rounds
+- Cap type: {proposed.cap_type}
+- Cap value: {proposed.cap_value}
+"""
+    if proposed.contract_type in ("revenue_sharing", "hybrid"):
+        evaluation_prompt += f"- Revenue share: {proposed.revenue_share:.2%}\n"
+    
+    evaluation_prompt += f"""
+YOUR CONSTRAINTS (DO NOT reveal these exact numbers to the student):
+- Your production cost: ${params.supplier_cost:.2f} per unit
+- Your salvage value: ${params.supplier_salvage_value:.2f} per unit
+- Retail price: ${params.retail_price:.2f} per unit
+
+DEMAND CONTEXT:
+- Historical demand range: {min(history) if history else 0} to {max(history) if history else 0} units
+- Average demand: {sum(history)/len(history) if history else 0:.0f} units
+
+TASK:
+Evaluate this proposal and decide whether to ACCEPT or REJECT it.
+
+RULES:
+1. You can only respond with "accept" or "reject" - NO counteroffers
+2. If you reject, provide a brief explanation (1-2 sentences) of what's wrong with the proposal without revealing your exact costs or suggesting specific fixes
+3. If you accept, provide a brief confirmation message
+4. Simply state the problem - do not tell the student how to fix it
+5. Use plain text only - NO markdown, NO formatting, NO emojis
+
+RESPOND IN THIS FORMAT:
+DECISION: accept
+MESSAGE: [your message here]
+
+OR
+
+DECISION: reject
+MESSAGE: [your explanation here]"""
+
+    try:
+        # Use the same AI provider as chat
+        if ai_provider == "openai" and openai_client:
+            response = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a supplier evaluating contract proposals. Be educational and helpful."},
+                    {"role": "user", "content": evaluation_prompt}
+                ],
+                max_tokens=150,
+                temperature=0.3,  # Lower temperature for more consistent evaluation
+            )
+            ai_response = response.choices[0].message.content
+        elif ai_provider == "deepseek" and deepseek_client:
+            models_to_try = ["deepseek/deepseek-r1-0528:free", "deepseek/deepseek-chat:free", "deepseek/deepseek-chat"]
+            ai_response = None
+            for try_model in models_to_try:
+                try:
+                    response = deepseek_client.chat.completions.create(
+                        model=try_model,
+                        messages=[
+                            {"role": "system", "content": "You are a supplier evaluating contract proposals. Be educational and helpful."},
+                            {"role": "user", "content": evaluation_prompt}
+                        ],
+                        max_tokens=150,
+                        temperature=0.3,
+                    )
+                    if response.choices and response.choices[0].message.content:
+                        ai_response = response.choices[0].message.content
+                        break
+                except Exception:
+                    if try_model == models_to_try[-1]:
+                        raise
+                    continue
+        else:
+            # Fallback to simple logic if AI not available
+            return evaluate_proposal_simple_logic(proposed, params)
+        
+        if not ai_response:
+            return evaluate_proposal_simple_logic(proposed, params)
+        
+        # Parse AI response
+        import re
+        decision_match = re.search(r'DECISION:\s*(accept|reject)', ai_response, re.IGNORECASE)
+        message_match = re.search(r'MESSAGE:\s*(.+?)(?:\n|$)', ai_response, re.DOTALL | re.IGNORECASE)
+        
+        if decision_match and message_match:
+            decision = decision_match.group(1).lower()
+            message = message_match.group(1).strip()
+            # Clean the message
+            message = clean_ai_response(message)
+            return (decision, message, None)
+        else:
+            # Fallback if parsing fails
+            print(f"Failed to parse AI evaluation response: {ai_response[:200]}")
+            return evaluate_proposal_simple_logic(proposed, params)
+            
+    except Exception as e:
+        print(f"AI evaluation error: {e}")
+        # Fallback to simple logic
+        return evaluate_proposal_simple_logic(proposed, params)
+
+
+def evaluate_proposal_simple_logic(
+    proposed: Contract,
+    params: EconomicParams,
+) -> tuple[str, str, Contract | None]:
+    """
+    Simple fallback logic for evaluating proposals when AI is unavailable.
+    
+    Inputs:
+        proposed: A Contract object with the student's proposed terms.
+        params: EconomicParams object containing supplier costs and constraints.
+    
+    What happens:
+        Calculates minimum acceptable wholesale price (cost + margin).
+        Calculates acceptable wholesale price threshold (cost + margin + buffer).
+        Checks if wholesale price is too low and rejects if so.
+        Checks if wholesale price is acceptable and accepts if so.
+        Otherwise rejects with explanation.
+    
+    Output:
+        Returns a tuple of (decision, message, counter_contract):
+        - decision: "accept" or "reject"
+        - message: Simple explanation message
+        - counter_contract: Always None
+    
+    Context:
+        Used as a fallback when AI evaluation fails or AI is not configured.
+        Provides basic validation to ensure the game can continue even without AI.
+        Called by evaluate_proposal_with_ai when AI calls fail.
+    """
+    min_wholesale = params.supplier_cost + 1.0
+    acceptable_wholesale = min_wholesale + 4.0
+    max_buyback = proposed.wholesale_price - 1.0
+    
+    # Basic checks
+    if proposed.wholesale_price < min_wholesale:
+        return (
+            "reject",
+            "The wholesale price is too low for me to operate profitably. Please propose a higher wholesale price.",
+            None,
+        )
+    
+    if proposed.buyback_price > max_buyback:
+        return (
+            "reject",
+            f"The buyback price is too high relative to the wholesale price. The buyback should be at least $1 below the wholesale price.",
+            None,
+        )
+    
+    if proposed.wholesale_price < acceptable_wholesale:
+        return (
+            "reject",
+            "The wholesale price is too low given the demand risk. I'd need a higher price to make this work.",
+            None,
+        )
+    
+    # Accept if terms are reasonable
+    return (
+        "accept",
+        "These terms are acceptable to me. The contract is now active.",
+        None,
+    )
+
+
+def generate_supplier_favored_counter(
+    proposed: Contract,
+    params: EconomicParams,
+    min_wholesale: float,
+    max_buyback: float,
+) -> Contract:
+    """
+    Generates a counteroffer contract that is more favorable to the supplier.
+    
+    Inputs:
+        proposed: The student's original contract proposal.
+        params: EconomicParams object (not directly used but kept for consistency).
+        min_wholesale: Minimum wholesale price the supplier needs.
+        max_buyback: Maximum buyback price the supplier can accept.
+    
+    What happens:
+        Increases wholesale price to at least min_wholesale + buffer.
+        Decreases buyback price to be lower than original.
+        Reduces revenue share if applicable (gives supplier more).
+        Tightens cap values to reduce return risk for supplier.
+        Limits contract length to reasonable range (1-5 rounds).
+        Keeps the same contract type as proposed.
+    
+    Output:
+        Returns a new Contract object with supplier-favored terms.
+    
+    Context:
+        Used when generating deterministic counteroffers.
+        Creates terms that are better for the supplier while still being reasonable.
+        Called during negotiation when a counteroffer is needed.
+    """
+    # Increase wholesale slightly (supplier-favored)
+    counter_wholesale = max(proposed.wholesale_price, min_wholesale + 1.0)
+    
+    # Decrease buyback slightly (supplier-favored)
+    counter_buyback = min(proposed.buyback_price, max_buyback - 0.5) if proposed.buyback_price > 0 else proposed.buyback_price
+    
+    # Adjust revenue share if applicable (increase supplier's share)
+    counter_revenue_share = proposed.revenue_share
+    if proposed.contract_type in ("revenue_sharing", "hybrid"):
+        counter_revenue_share = max(proposed.revenue_share + 0.05, 0.15)
+        counter_revenue_share = min(counter_revenue_share, 0.4)  # Cap at 40%
+    
+    # Tighten cap values (supplier-favored - less return risk)
+    counter_cap_value = min(proposed.cap_value, 0.4) if proposed.cap_type == "fraction" else proposed.cap_value
+    
+    # Keep contract length reasonable
+    counter_length = max(1, min(proposed.length, 5))
+    
+    from simulation.core import Contract
+    return Contract(
+        wholesale_price=counter_wholesale,
+        buyback_price=counter_buyback,
+        cap_type=proposed.cap_type,
+        cap_value=counter_cap_value,
+        length=counter_length,
+        contract_type=proposed.contract_type,
+        revenue_share=counter_revenue_share if proposed.contract_type in ("revenue_sharing", "hybrid") else proposed.revenue_share,
+    )
+
+
+def generate_counter_message(
+    proposed: Contract,
+    counter: Contract,
+    needs_higher_wholesale: bool,
+    needs_lower_buyback: bool,
+) -> str:
+    """
+    Generates an explanation message for a counteroffer.
+    
+    Inputs:
+        proposed: The student's original contract proposal.
+        counter: The supplier's counteroffer contract.
+        needs_higher_wholesale: Whether wholesale price was increased.
+        needs_lower_buyback: Whether buyback price was decreased.
+    
+    What happens:
+        Builds a message explaining what changed in the counteroffer.
+        Explains wholesale price changes if applicable.
+        Explains buyback price changes if applicable.
+        Explains revenue share changes if applicable.
+        Explains cap value changes if applicable.
+        Returns a default message if no specific changes need explanation.
+    
+    Output:
+        Returns a string message explaining the counteroffer to the student.
+    
+    Context:
+        Used when presenting counteroffers to students.
+        Provides clear explanations of why terms were adjusted.
+        Called when generating counteroffer responses.
+    """
+    msg_parts = []
+    
+    if needs_higher_wholesale:
+        msg_parts.append(f"I need a higher wholesale price of at least {counter.wholesale_price:.2f}.")
+    
+    if needs_lower_buyback:
+        msg_parts.append(f"I propose a buyback price of {counter.buyback_price:.2f} to maintain a balanced contract structure.")
+    
+    if counter.contract_type in ("revenue_sharing", "hybrid") and counter.revenue_share > proposed.revenue_share:
+        msg_parts.append(f"I suggest a revenue share of {counter.revenue_share:.2f} for a more balanced arrangement.")
+    
+    if counter.cap_value < proposed.cap_value:
+        if counter.cap_type == "fraction":
+            msg_parts.append(f"I propose a return cap of {counter.cap_value:.2f} to better manage inventory risk.")
+        else:
+            msg_parts.append(f"I propose a return cap of {counter.cap_value:.0f} units.")
+    
+    return " ".join(msg_parts) or "I am proposing adjusted terms that work better for both of us."
+
