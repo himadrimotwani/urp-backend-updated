@@ -23,36 +23,25 @@ from typing import Any, Dict, List
 # ================================
 
 @dataclass
-class Contract:
+class EconomicParams:
     """
-    Represents a supply chain contract between buyer and supplier.
-
+    Economic parameters that define the supply chain environment.
+    
     Attributes:
-        wholesale_price: Price buyer pays supplier per unit (w)
-        buyback_price: Price supplier pays buyer for returned units (b)
-        cap_type: Type of return cap - "fraction" or "unit"
-        cap_value: Cap value - fraction (0-1) or unit count (B_max)
-        length: Total number of rounds contract lasts (L)
-        remaining_rounds: Number of rounds left in contract (auto-set to length if None)
-        contract_type: Type of contract - "buyback", "revenue_sharing", or "hybrid"
-        revenue_share: Fraction of sales revenue supplier receives (0-1, for revenue_sharing/hybrid)
+        retail_price: Price at which buyer sells to customers (p)
+        buyer_salvage_value: Value buyer gets for leftover inventory (v_B)
+        return_shipping_buyer: Cost buyer pays to ship returns (c_ret)
+        supplier_cost: Cost supplier pays to produce one unit (c)
+        supplier_salvage_value: Value supplier gets for returned units (v_S)
+        return_handling_supplier: Cost supplier pays to handle returns (h)
     """
-    wholesale_price: float                  # w
-    buyback_price: float                    # b
-    cap_type: str                           # "fraction" or "unit"
-    cap_value: float = 1                     # fixed to 1, ignoring input
-    length: int                             # number of rounds (L)
-    remaining_rounds: int | None = None     # remaining rounds on contract
+    retail_price: float = 50.0              # p
+    buyer_salvage_value: float = 3.0        # v_B
+    return_shipping_buyer: float = 1        # c_ret
 
-    contract_type: str = "buyback"          # "buyback", "revenue_sharing", "hybrid"
-    revenue_share: float = 0.2              # ideal fixed revenue share
-
-    def __post_init__(self) -> None:
-        """
-        Initializes remaining_rounds if not provided.
-        """
-        if self.remaining_rounds is None:
-            self.remaining_rounds = self.length
+    supplier_cost: float = 12.0             # c
+    supplier_salvage_value: float = 12.0    # v_S
+    return_handling_supplier: float = 0.5   # h
 
 
 # ================================
