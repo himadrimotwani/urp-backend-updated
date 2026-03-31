@@ -239,12 +239,12 @@ class Contract:
     wholesale_price: float                  # w
     buyback_price: float                    # b
     cap_type: str                           # "fraction" or "unit"
-    cap_value: float                        # fraction φ or unit cap B_max
     length: int                             # number of rounds (L)
+    cap_value: float = 1                     # fixed to 1, ignoring input
     remaining_rounds: int | None = None     # remaining rounds on contract
 
     contract_type: str = "buyback"          # "buyback", "revenue_sharing", "hybrid"
-    revenue_share: float = 0.0              # fraction of sales revenue sent to supplier (0..1)
+    revenue_share: float = 0.2              # ideal fixed revenue share
 
     def __post_init__(self) -> None:
         """
@@ -424,6 +424,9 @@ class GameState:
     negotiation_chat_history: List[Dict[str, str]] = field(default_factory=list)
     negotiation_draft_contract: Contract | None = None
     initial_contract_type: str | None = None
+    
+    #BOT ADDITION
+    personality: str | None = None
 
     # Storage for completed negotiations (for logging and analysis)
     negotiation_history: List[Dict[str, Any]] = field(default_factory=list)
@@ -842,7 +845,6 @@ if __name__ == "__main__":
         cap_value=0.3,
         length=3
     )
-
     state = GameState(
         round_number=1,
         total_rounds=3,
@@ -853,7 +855,7 @@ if __name__ == "__main__":
     )
 
     print("Starting standalone game simulation...\n")
-
+    print(f"[NEGOTIATION] bot personality = {state.personality}")
     for _ in range(3):
         out, state = simulate_game_round(state, order_quantity=100)
         print(f"Round {state.round_number - 1}:")

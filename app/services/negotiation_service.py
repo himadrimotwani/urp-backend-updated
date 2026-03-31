@@ -9,6 +9,7 @@ from app.services.ai_client import openai_client, deepseek_client, ai_provider
 
 def supplier_evaluate_contract(
     proposed: Contract,
+    personality: str,
 ) -> tuple[str, str, Contract | None]:
     """
     Evaluates a contract proposal from the student using AI.
@@ -46,12 +47,12 @@ def supplier_evaluate_contract(
     
     # Use AI to evaluate the proposal
     # This provides more nuanced evaluation and educational feedback
-    return evaluate_proposal_with_ai(proposed, params)
-
+    return evaluate_proposal_with_ai(proposed, params, personality)
 
 def evaluate_proposal_with_ai(
     proposed: Contract,
     params: EconomicParams,
+    personality: str,
 ) -> tuple[str, str, Contract | None]:
     """
     Uses AI to evaluate a contract proposal and provide educational feedback.
@@ -161,10 +162,10 @@ MESSAGE: [your explanation here]"""
                     continue
         else:
             # Fallback to simple logic if AI not available
-            return evaluate_proposal_simple_logic(proposed, params)
+            return evaluate_proposal_simple_logic(proposed, params, personality)
         
         if not ai_response:
-            return evaluate_proposal_simple_logic(proposed, params)
+            return evaluate_proposal_simple_logic(proposed, params, personality)
         
         # Parse AI response
         import re
@@ -180,76 +181,61 @@ MESSAGE: [your explanation here]"""
         else:
             # Fallback if parsing fails
             print(f"Failed to parse AI evaluation response: {ai_response[:200]}")
-            return evaluate_proposal_simple_logic(proposed, params)
+            return evaluate_proposal_simple_logic(proposed, params, personality)
             
     except Exception as e:
         print(f"AI evaluation error: {e}")
         # Fallback to simple logic
-        return evaluate_proposal_simple_logic(proposed, params)
+        return evaluate_proposal_simple_logic(proposed, params, personality)
 
 
 def evaluate_proposal_simple_logic(
     proposed: Contract,
     params: EconomicParams,
+    personality: str,
 ) -> tuple[str, str, Contract | None]:
     """
-    Simple fallback logic for evaluating proposals when AI is unavailable.
-    
-    Inputs:
-        proposed: A Contract object with the student's proposed terms.
-        params: EconomicParams object containing supplier costs and constraints.
-    
-    What happens:
-        Calculates minimum acceptable wholesale price (cost + margin).
-        Calculates acceptable wholesale price threshold (cost + margin + buffer).
-        Checks if wholesale price is too low and rejects if so.
-        Checks if wholesale price is acceptable and accepts if so.
-        Otherwise rejects with explanation.
-    
-    Output:
-        Returns a tuple of (decision, message, counter_contract):
-        - decision: "accept" or "reject"
-        - message: Simple explanation message
-        - counter_contract: Always None
-    
-    Context:
-        Used as a fallback when AI evaluation fails or AI is not configured.
-        Provides basic validation to ensure the game can continue even without AI.
-        Called by evaluate_proposal_with_ai when AI calls fail.
+    Personality-aware fallback logic for evaluating proposals when AI is unavailable.
     """
-    min_wholesale = params.supplier_cost + 1.0
-    acceptable_wholesale = min_wholesale + 4.0
-    max_buyback = proposed.wholesale_price - 1.0
-    
-    # Basic checks
-    if proposed.wholesale_price < min_wholesale:
-        return (
-            "reject",
-            "The wholesale price is too low for me to operate profitably. Please propose a higher wholesale price.",
-            None,
-        )
-    
-    if proposed.buyback_price > max_buyback:
-        return (
-            "reject",
-            f"The buyback price is too high relative to the wholesale price. The buyback should be at least $1 below the wholesale price.",
-            None,
-        )
-    
-    if proposed.wholesale_price < acceptable_wholesale:
-        return (
-            "reject",
-            "The wholesale price is too low given the demand risk. I'd need a higher price to make this work.",
-            None,
-        )
-    
-    # Accept if terms are reasonable
-    return (
-        "accept",
-        "These terms are acceptable to me. The contract is now active.",
-        None,
-    )
 
+    # Basic structural checks (keep these — they prevent broken contracts)
+    if proposed.buyback_price >= proposed.wholesale_price:
+        return (
+            "reject",
+            "The buyback price must be lower than the wholesale price for the contract to work.",
+            None,
+        )
+
+    # Core intuition:
+    # - Higher wholesale price (w) helps supplier
+    # - Higher buyback price (b) hurts supplier
+    margin = proposed.wholesale_price - params.supplier_cost
+    risk = proposed.buyback_price
+
+    # Simple scoring function (fast + stable)
+    score = margin - 0.5 * risk
+
+    # Personality thresholds
+    if personality == "selfish":
+        threshold = 8
+    elif personality == "fair":
+        threshold = 4
+    else:  # altruistic
+        threshold = 1
+
+    # Decision
+    if score >= threshold:
+        return (
+            "accept",
+            "These terms are acceptable to me.",
+            None,
+        )
+    else:
+        return (
+            "reject",
+            "These terms do not give me enough protection given the demand risk.",
+            None,
+        )
 
 def generate_supplier_favored_counter(
     proposed: Contract,

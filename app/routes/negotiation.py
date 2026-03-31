@@ -161,8 +161,10 @@ def negotiate(request: NegotiateRequest) -> NegotiateResponse:
     state.initial_contract_type = request.contract_type
 
     # Evaluate the proposal using AI (returns accept or reject, never counter on initial proposal)
-    decision, ai_message, counter_contract = supplier_evaluate_contract(proposed)
-
+    decision, ai_message, counter_contract = supplier_evaluate_contract(
+        proposed,
+        state.personality
+    )
     counter_contract_data = None
 
     # Handle the supplier's decision
